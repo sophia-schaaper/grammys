@@ -1,0 +1,1654 @@
+---
+title: "Racial and Gender Disparities in Grammy Nominations and Wins"
+author: "Sophia Schaaper"
+date: "15/01/2025"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+package_check <- function(need = c()){
+  have <- need %in% rownames(installed.packages()) # checks packages you have
+  if(any(!have)) install.packages(need[!have]) # install missing packages
+  invisible(lapply(need, library, character.only=T))
+}
+
+package_check(c("dplyr", "rvest", "purrr", "stringr", "tidyr", "tidyverse", 
+                "ggplot2", "gridExtra", "scales"))
+
+```
+
+**Prompt: 2**
+
+**ChatGPT/AI disclosure statement: I used ChatGPT a lot in brainstorming for an idea, probably not very useful since I changed topics about five times**
+
+## 1. What Jay-Z had to say:
+
+The Grammy Awards are regarded as one of the most prestigious recognitions in music. This data responds to critiques, including allegations by figures like Jay-Z, who have called out the awards for favoritism and perpetuating underrepresentation. This project focuses on compiling data from Grammy nominations in the general categories: Album of the Year, Record of the Year, Song of the Year, and Best New Artist, from 1995 to now. Additionally, biographical information about the artists, including their gender, descent, genres, labels, and career timelines, is being gathered. By integrating nomination trends with artist demographics, this data will enable an examination of patterns in recognition. The Grammys are powerful markers of prestige and cultural value, diverse and representative recognition is essential for promoting fairness within the industry but also to reflect the full spectrum of talent. This project lies at the intersection of cultural institutions and social equity, examining whether the Grammy’s reinforce inequities in representation.
+
+## 2. The Grammy Awards: General Categories:
+
+The “General Field”, which is the only category not restricted by music genre, has four awards: Record of the Year, Album of the Year, and Best New Artist, which are awarded to the performer, along with Song of the Year, which is presented to the songwriter(s). For each of these categories, since the 37th Edition (1995), we scraped information from Wikipedia on `Edition`, `Year`, `Category`, `Title` (of the song or album), `Artist`, and `Winner`(a column coded as 1 if it won, 0 if not, and NA for the 67th Edition as it will be taking place February 2nd, 2025).
+
+The collection of this data was automated for most of the editions, however the 55th, 66th, and 67th Grammy Awards, along with song titles from the 37th edition, had to be scraped individually due to differing structures. For the `Artist` column, featured artists were removed, unless the song was an official collaboration and cannot be attributed to a singular artist.
+
+NB: Song of the Year is officially presented to the songwriter(s), however, the performer is included as artist here. Songwriters mostly aren’t public figures, they do not influence the commercial success or public image of a song in the same way that performers do. The descision to include the performer reflects the goal of examining patterns of bias.
+
+This data forms the foundation of our secondary data, on which most analysis will be performed, we therefore consider this as primary data.
+
+```{r scraping grammys}
+
+#first we generate a function to automate over the Grammy pages that work: 
+#generate the editions to paste into the Wikipedia link
+generate_editions <- c('65th', '64th', '63rd', '62nd', '61st', '60th', '59th', 
+                       '58th', '57th', '56th', '54th', '53rd', '52nd', '51st', 
+                       '50th', '49th', '48th', '47th', '46th', '45th', '44th',
+                       '43rd', '42nd', '41st', '40th', '39th', '38th', '37th')
+
+#generate selector for each edition (as they vary per page)
+generate_x <- c(32, 36, 34, 33, 24, 21, 22, 19, 23, 18, 31, 29, 18, 31, 
+                21, 22, 20, 14, 20, 16, 15, 15, 14, 15, 17, 14, 15, 13)
+
+###the function
+grammys_info <- function(edition, x) {
+  
+  grammys <- paste0("https://en.wikipedia.org/wiki/", edition, 
+                    "_Annual_Grammy_Awards")
+  grammys_page <- read_html(grammys)
+  
+  Sys.sleep(2) #for read_html
+  
+  #the selectors for each based on the number node in generate_x
+  record_selector <- sprintf("ul:nth-child(%d) > li", x)
+  album_selector <- sprintf("ul:nth-child(%d) > li", x + 2)
+  song_selector <- sprintf("ul:nth-child(%d) > li", x + 4)
+  new_selector <- sprintf("ul:nth-child(%d) > li", x + 6)
+  
+  #record of the year: ectract Title - Artist
+  nominations_record <- grammys_page %>%
+    html_nodes(record_selector) %>%
+    html_text(trim = TRUE) %>%
+    str_extract("^.*?[–-]\\s[^\\n]*") %>% #grabs everything on that line
+    str_replace_all("[\"']", "") %>% #removes the quotation marks around title
+    str_trim()
+  
+  #combine into a df
+  record_df <- tibble(
+    Edition = edition,
+    Category = "Record of the Year",
+    Title = str_extract(nominations_record, "^[^–-]+") %>% 
+      str_trim(), #this extract everything before the dash: the title
+    Artist = str_extract(nominations_record, "(?<=–\\s|(?<=-\\s)).*") %>% 
+      str_trim()) %>% #this extracts everything after the dash: the artist
+    mutate(Winner = ifelse(row_number() == 1, 1, 0)) #winner in top row
+  
+  #album of the year: extract Title - Artist
+  nominations_album <- grammys_page %>%
+    html_nodes(album_selector) %>%
+    html_text(trim = TRUE) %>%
+    str_extract("^.*?[–-]\\s[^\\n]*") %>%
+    str_replace_all("[\"']", "") %>% 
+    str_trim()
+  
+  album_df <- tibble(
+    Edition = edition,
+    Category = "Album of the Year",
+    Title = str_extract(nominations_album, "^[^–-]+") %>% str_trim(), 
+    Artist = str_extract(nominations_album, "(?<=–\\s|(?<=-\\s)).*") %>% 
+      str_trim()) %>%
+    mutate(Winner = ifelse(row_number() == 1, 1, 0))
+  
+  #song of the year: structured as Title - Songwriters (Performer)
+  nominations_song <- grammys_page %>%
+    html_nodes(song_selector) %>%
+    html_text(trim = TRUE)
+  
+  song_df <- tibble(
+    Edition = edition,
+    Category = "Song of the Year",
+    Title = str_extract(nominations_song, "^\"[^\"]+\"") %>% 
+      str_replace_all("[\"']", "") %>% str_trim(),
+    #we want to extract performer, usually in parentheses
+    Artist =
+      case_when(!is.na(str_extract(nominations_song, "\\(([^\\)]+)\\)$")) ~
+                         str_extract(nominations_song, "\\(([^\\)]+)\\)$") %>%
+                         str_replace_all("[\\(\\)]", "") %>% 
+                         str_trim(), 
+    #sometimes it is instead structured: Title - Performer, Songwriters
+                       TRUE ~ str_extract(nominations_song, 
+                       "(?<=–\\s|(?<=-\\s)).*") %>% str_trim())) %>%
+    mutate(Winner = ifelse(row_number() == 1, 1, 0))
+  
+  nominations_new_artist <- grammys_page %>%
+    html_nodes(new_selector) %>%
+    html_text(trim = TRUE)
+  
+  new_df <- tibble(
+    Edition = edition,
+    Category = "Best New Artist",
+    Title = "Category: Best New Artist",  #because this category doenst have a title                                   
+    Artist = nominations_new_artist %>% str_trim()) %>%
+    mutate(Winner = ifelse(row_number() == 1, 1, 0))
+  
+  #combine into a df for each edition
+  bind_rows(record_df, album_df, song_df, new_df)
+}
+
+#iterate over the editions
+all_grammys <- map2_dfr(generate_editions, generate_x, ~grammys_info(.x, .y))
+
+##fix 37th Edition titles
+#read the page for the 37th edition
+grammys_37th_page <- read_html("https://en.wikipedia.org/wiki/37th_Annual_Grammy_Awards")
+grammys_37th_titles <- grammys_37th_page %>%
+  html_nodes("ul:nth-child(17) > li") %>%
+  html_nodes("a:first-of-type") %>%
+  html_text(trim = TRUE)
+
+#only extract every other one (by = 2) to only get the titles
+filtered_titles <- grammys_37th_titles[seq(1, length(grammys_37th_titles), 
+                                           by = 2)] 
+
+#add the extracted titles to the df
+all_grammys <- all_grammys %>%
+  group_by(Edition, Category) %>%
+  mutate(Title = case_when(Edition == "37th" & Category == "Song of the Year" 
+                           ~ filtered_titles[row_number()],
+    TRUE ~ Title)) %>%
+  ungroup()
+
+#remove intermediary steps
+rm(generate_editions, generate_x, grammys_37th_titles, grammys_37th_page,
+   filtered_titles)
+
+#individually scrape 67th, 66th and 55th editions
+#######################
+#grammy's 67th Edition:
+grammys <- "https://en.wikipedia.org/wiki/67th_Annual_Grammy_Awards"
+grammys_page <- read_html(grammys)
+
+#grab record of the year nomination
+nominations_record <- grammys_page %>%
+  html_nodes("table:nth-child(19) > tbody > tr:nth-child(1) > td > ul > li") %>%
+  html_text(trim = TRUE) %>%
+  str_extract("^.*?–\\s[^\\n]*") %>% #grabs everything on that line
+  str_replace_all("[\"']", "") %>% #removes the quotation marks around the title
+  str_trim()
+
+#put into a df with edition, category, title, and artist
+record_67_df <- tibble(
+  Edition = "67th",
+  Category = "Record of the Year",
+  #it is under the format "Title - Artist"
+  Title = str_extract(nominations_record, "^[^–-]+") %>% 
+    str_trim(), #extract everything before the dash: the title
+  Artist = str_extract(nominations_record, "(?<=–\\s|(?<=-\\s)).*") %>% 
+    str_trim()) %>% #extract everything after the dash: the artist
+  mutate(Winner = NA) #67th edition takes place this Feb, results aren't out yet
+
+#do the same for album of the year category
+nominations_album <- grammys_page %>%
+  html_nodes("table:nth-child(19) > tbody > tr:nth-child(2) > td > ul > li") %>%
+  html_text(trim = TRUE) %>%
+  str_extract("^.*?–\\s[^\\n]*") %>%
+  str_replace_all("[\"']", "") %>% 
+  str_trim()
+
+album_67_df <- tibble(
+  Edition = "67th",
+  Category = "Album of the Year",
+  Title = str_extract(nominations_album, "^[^–]+") %>% 
+    str_trim(), 
+  Artist = str_extract(nominations_album, "(?<=–\\s|(?<=-\\s)).*") %>% 
+    str_trim()) %>%
+  mutate(Winner = NA)
+
+#song of the year is structured differently
+nominations_song <- grammys_page %>%
+  html_nodes("table:nth-child(19) > tbody > tr:nth-child(3) > td > ul > li") %>%
+  html_text(trim = TRUE)
+
+song_67_df <- tibble(
+  Edition = "67th",
+  Category = "Song of the Year",
+  Title = str_extract(nominations_song, "^\"[^\"]+\"") %>% 
+    str_replace_all("[\"']", "") %>%  str_trim(),  
+  #this extracts whats between quotation marks: the title
+  Artist = str_extract(nominations_song, "\\(([^\\)]+)\\)$") %>% 
+    str_replace_all("[\\(\\)]", "") %>% str_trim()) %>%
+  #this extracts whats between parenthesis: the artist
+  mutate(Winner = NA)
+
+#best new artist
+nominations_new <- grammys_page %>%
+  html_nodes("table:nth-child(19) > tbody > tr:nth-child(4) > td > ul > li") %>%
+  html_text(trim = TRUE)
+
+new_67_df <- tibble(
+  Edition = "67th",
+  Category = "Best New Artist",
+  Title = "Category: Best New Artist",                                     
+  Artist = nominations_new %>% str_trim()) %>%
+  mutate(Winner = NA)
+
+#combine into a one df and remove intermediary steps
+grammy_67th_df <- bind_rows(record_67_df, album_67_df, song_67_df, new_67_df)
+rm(record_67_df, album_67_df, song_67_df, nominations_record, 
+   nominations_album, nominations_song, nominations_new, new_67_df)
+
+#######################
+#repeat for 66th grammys
+grammys <- "https://en.wikipedia.org/wiki/66th_Annual_Grammy_Awards"
+grammys_page <- read_html(grammys)
+
+#record of the year
+nominations_record <- grammys_page %>%
+  html_nodes("table:nth-child(33) > tbody > tr:nth-child(1) > td > ul > li") %>%
+  html_text(trim = TRUE) %>%
+  str_extract("^.*?–\\s[^\\n]*") %>% 
+  str_replace_all("[\"']", "") %>%
+  str_trim()
+
+record_66_df <- tibble(
+  Edition = "66th",
+  Category = "Record of the Year",
+  Title = str_extract(nominations_record, "^[^–-]+") %>% str_trim(), 
+  Artist = str_extract(nominations_record, "(?<=–\\s|(?<=-\\s)).*") %>% 
+    str_trim()) %>%
+  mutate(Winner = ifelse(row_number() == 1, 1, 0))
+  #the winner is always in the top row so we code that as = 1
+
+#album of the year
+nominations_album <- grammys_page %>%
+  html_nodes("table:nth-child(33) > tbody > tr:nth-child(2) > td > ul > li") %>%
+  html_text(trim = TRUE) %>%
+  str_extract("^.*?–\\s[^\\n]*") %>%
+  str_replace_all("[\"']", "") %>% 
+  str_trim()
+
+album_66_df <- tibble(
+  Edition = "66th",
+  Category = "Album of the Year",
+  Title = str_extract(nominations_album, "^[^–]+") %>% 
+    str_trim(), 
+  Artist = str_extract(nominations_album, "(?<=–\\s|(?<=-\\s)).*") %>% 
+    str_trim()) %>%
+  mutate(Winner = ifelse(row_number() == 1, 1, 0))
+
+#song of the year 
+nominations_song <- grammys_page %>%
+  html_nodes("table:nth-child(33) > tbody > tr:nth-child(3) > td > ul > li") %>%
+  html_text(trim = TRUE)
+
+song_66_df <- tibble(
+  Edition = "66th",
+  Category = "Song of the Year",
+  Title = str_extract(nominations_song, "^\"[^\"]+\"") %>% 
+    str_replace_all("[\"']", "") %>%  str_trim(),                                         
+  Artist = str_extract(nominations_song, "\\(([^\\)]+)\\)$") %>% 
+    str_replace_all("[\\(\\)]", "") %>% str_trim()) %>%
+  #add nominee, as names after title (!= artist)
+  mutate(Winner = ifelse(row_number() == 1, 1, 0))
+
+#grab bets new artist
+nominations_new <- grammys_page %>%
+  html_nodes("#mw-content-text > div.mw-content-ltr.mw-parser-output > table:nth-child(33) > tbody > tr:nth-child(4) > td > ul > li") %>%
+  html_text(trim = TRUE)
+
+new_66_df <- tibble(
+  Edition = "66th",
+  Category = "Best New Artist",
+  Title = "Category: Best New Artist",                                    
+  Artist = str_split(nominations_new, "\n")[[1]]) %>%
+  mutate(Winner = ifelse(row_number() == 1, 1, 0))
+
+#combine into a df and remove intermediary steps
+grammy_66th_df <- bind_rows(record_66_df, album_66_df, song_66_df, new_66_df)
+rm(record_66_df, album_66_df, song_66_df, nominations_record, 
+   nominations_album, nominations_song, nominations_new, new_66_df)
+
+#######################
+#repeat for 55th edition
+grammys <- "https://en.wikipedia.org/wiki/55th_Annual_Grammy_Awards"
+grammys_page <- read_html(grammys)
+
+#record of the year
+nominations_record <- grammys_page %>%
+  html_nodes("table:nth-child(23) > tbody > tr:nth-child(2) > td:nth-child(1) > 
+             ul > li") %>%
+  html_text(trim = TRUE) %>%
+  str_extract("^.*?[–-]\\s[^\\n]*") %>% 
+  str_replace_all("[\"']", "") %>%
+  str_trim()
+
+more_record <- grammys_page %>%
+  html_nodes("table:nth-child(23) > tbody > tr:nth-child(2) > td:nth-child(1) > 
+             ul > li > ul > li") %>%
+  html_text(trim = TRUE) %>%
+  str_extract("^.*?[–-]\\s[^\\n]*") %>% 
+  str_replace_all("[\"']", "") %>%
+  str_trim()
+
+#this page had nested lists so particularly weird structure
+#had to grab big list and nested lists separately to combine them
+all_55th_records <- c(nominations_record, more_record)
+
+#turn to df
+record_55_df <- tibble(
+  Edition = "55th",
+  Category = "Record of the Year",
+  Title = str_extract(all_55th_records, "^[^–-]+") %>% str_trim(), 
+  Artist = str_extract(all_55th_records, "(?<=–\\s|(?<=-\\s)).*") %>% 
+    str_trim()) %>%
+  mutate(Winner = ifelse(row_number() == 1, 1, 0))
+
+#album of the year
+nominations_album <- grammys_page %>%
+  html_nodes("table:nth-child(23) > tbody > tr:nth-child(2) > td:nth-child(2) > 
+             ul > li") %>%
+  html_text(trim = TRUE) %>%
+  str_extract("^.*?–\\s[^\\n]*") %>%
+  str_replace_all("[\"']", "") %>% 
+  str_trim()
+
+more_album <- grammys_page %>%
+  html_nodes("table:nth-child(23) > tbody > tr:nth-child(2) > td:nth-child(2) > 
+             ul > li > ul > li") %>%
+  html_text(trim = TRUE) %>%
+  str_extract("^.*?[–-]\\s[^\\n]*") %>%
+  str_replace_all("[\"']", "") %>% 
+  str_trim()
+
+all_55th_albums <- c(nominations_album, more_album)
+
+album_55_df <- tibble(
+  Edition = "55th",
+  Category = "Album of the Year",
+  Title = str_extract(all_55th_albums, "^[^–-]+") %>% str_trim(), 
+  Artist = str_extract(all_55th_albums, "(?<=–\\s|(?<=-\\s)).*") %>% 
+    str_trim()) %>%
+  mutate(Winner = ifelse(row_number() == 1, 1, 0))
+
+#song of the year
+nominations_song <- grammys_page %>%
+  html_nodes("table:nth-child(23) > tbody > tr:nth-child(4) > td:nth-child(1) > 
+             ul > li") %>%
+  html_text(trim = TRUE)
+
+more_song <- grammys_page %>%
+  html_nodes("table:nth-child(23) > tbody > tr:nth-child(4) > td:nth-child(1) > 
+             ul > li > ul > li") %>%
+  html_text(trim = TRUE)
+
+all_55th_songs <- c(nominations_song, more_song)
+
+song_55_df <- tibble(
+  Edition = "55th",
+  Category = "Song of the Year",
+  Title = str_extract(all_55th_songs, "^\"[^\"]+\"") %>% 
+    str_replace_all("[\"']", "") %>%  str_trim(),                                         
+  Artist = str_extract(all_55th_songs, "\\(([^\\)]+)\\)$") %>% 
+    str_replace_all("[\\(\\)]", "") %>% str_trim()                          
+) %>%
+  mutate(Winner = ifelse(row_number() == 1, 1, 0))
+
+nominations_new <- grammys_page %>%
+  html_nodes("#mw-content-text > div.mw-content-ltr.mw-parser-output > 
+             table:nth-child(23) > tbody > tr:nth-child(4) > td:nth-child(2) 
+             > ul > li") %>%
+  html_text(trim = TRUE)
+
+new_55_df <- tibble(
+  Edition = "55th",
+  Category = "Best New Artist",
+  Title = "NA",                                     
+  Artist = str_split(nominations_new, "\n")[[1]]) %>%
+  mutate(Winner = ifelse(row_number() == 1, 1, 0))
+
+#combine into a df and remove intermediary steps
+grammy_55th_df <- bind_rows(record_55_df, album_55_df, song_55_df, new_55_df)
+rm(record_55_df, album_55_df, song_55_df, all_55th_records, all_55th_albums, 
+   all_55th_songs, more_album, more_record, more_song, nominations_album, 
+   nominations_record, nominations_song, grammys, grammys_page, 
+   nominations_new, new_55_df)
+
+#########
+#combine all the editions
+all_grammys <- bind_rows(grammy_66th_df, grammy_55th_df, grammy_67th_df, 
+                         all_grammys)
+#remove individual editions now
+rm(grammy_66th_df, grammy_55th_df, grammy_67th_df, grammys_info)
+
+#clean up, create a year column and sort them in that order
+all_grammys <- all_grammys %>% 
+  mutate(edition_num = as.numeric(str_extract(Edition, "\\d+")),
+         Year = edition_num + 1958) %>%
+  arrange(desc(Year)) %>%
+  select(-edition_num) %>%
+  
+  #remove artist featurings, keep only main
+  mutate(Artist = str_remove(Artist, 
+                             "(?i)\\s*(feat(?:uring)?\\.?\\s.*|with\\s.*)")) %>%
+  
+  #for official collaborations standardise format
+  mutate(Artist = str_replace_all(Artist, " and ", " & ")) %>%
+  mutate(Artist = str_replace(Artist, ", & separately ", " & ")) %>%
+  mutate(Artist = str_remove(Artist, "\\[.*$")) %>%
+  mutate(Artist = str_remove(Artist, ";.*$")) %>%
+  
+  #change artist names to full names when not complete
+  mutate(Artist = case_when(Artist == "Lacy" ~ "Steve Lacy",
+                            Artist == "Styles" ~ "Harry Styles",
+                            Artist == "Swift" ~ "Taylor Swift",
+                            Artist == "Lamar" ~ "Kendrick Lamar",
+                            Artist == "Sheeran" ~ "Ed Sheeran",
+                            Artist == "Rodrigo" ~ "Olivia Rodrigo",
+                            Artist == "Eilish" ~ "Billie Eilish",
+                            Artist == "Bieber" ~ "Justin Bieber",
+                            Artist == "Carlile" ~ "Brandi Carlile",
+                            Artist == "Lipa" ~ "Dua Lipa",
+                            Artist == "Saxe" ~ "JP Saxe",
+                            Artist == "(Various Artists)" ~ "Kendrick Lamar",
+                            #this is from Black Panther: The Album, 
+                            #produced by Kendrick Lamar
+                            Artist == "Keys & Carlile" ~ 
+                              "Alicia Keys & Brandi Carlile",
+                            Artist == "Raitt" ~ "Bonnie Raitt",
+                            Artist == "Crow" ~ "Sheryl Crow",
+                            Artist == "John" ~ "Elton John",
+                            Artist == "Springsteen" ~ "Bruce Springsteen",
+                            Artist == "Soundtrack – Various Artists" ~ 
+                              "T-Bone Burnett",
+                            #this is from O Brother, Where Art Thou?, 
+                            #produced by T-Bone Burnett
+                            Artist == "various artists" ~ "Babyface", 
+                            #this is from Waiting to Exhale, 
+                            #produced by Babyface
+                            Artist == "Destinys Child" ~ "Destiny's Child",
+                            Artist == "DAngelo & the Vanguard" ~ "D'Angelo",
+                            Artist == "Ray Charles & Various Artists" 
+                                        ~ "Ray Charles",
+                            Artist == "HAIM" ~ "Haim",
+                            TRUE ~ Artist))
+
+all_grammys <- all_grammys[, c("Edition", "Year", "Category", 
+                               "Title", "Artist", "Winner")]
+all_grammys$Category <- as.factor(all_grammys$Category)
+all_grammys$Artist <- as.factor(all_grammys$Artist)
+all_grammys$Edition <- as.factor(all_grammys$Edition)
+
+#print preview
+print(winners <- all_grammys %>% filter(Winner == 1) %>% 
+  filter(Year == 1995 | Year == 2005 | Year == 2015 | Year == 2024) %>%
+  filter(Category == "Record of the Year" | Category == "Song of the Year") %>%
+  select(Edition, Category, Title, Artist))
+
+```
+
+## 3. Artists Biographical Information:
+
+The secondary dataset is initiated from the `Artist` column of the primary Grammy nominations dataset, Its purpose is to provide context on artist identities, critical for examining disparities in recognition and awards distribution. The column `Band` was manually encoded, bands set as 1 and solo artists as 0. Initially, we wanted information about the artists' popularity—such as followers, monthly listeners, and chart performance—but access limitations and approval requirements made it unfeasible. Consequently, we turned to Wikipedia, which provided valuable details. A function was used to automatically generate the Wikipedia URL for each artist. We implement a function for bands that retrieved information on current and past members. This is because of the role all band members play in shaping the public image and success of the group. Another function was used to scrape biographical information: `Birth Date`, `Country`, `Occupation`, `Years Active`, `Genres`, and `Labels`. For solo artists `Country` is the place of birth, while for bands it is the ‘country of origin’. Additionally, `Birth Date` for bands is their formation date, assumed to be the first year listed in the `Years_Active` column.
+
+```{r biographical data}
+#from all_grammys take each artists and initiate a new df
+artists_df <- all_grammys %>%
+  #when there are collabs we want to separate them:
+  separate_rows(Artist, sep = " & ") %>%
+  separate_rows(Artist, sep = ",") %>%
+  separate_rows(Artist, sep = ";") %>%
+  mutate(Artist = str_trim(Artist)) %>%
+  mutate(Artist = case_when
+         #separating by '&' messed up when '&' is in the band name
+         #same for 'and'
+         (Artist == "Mumford" ~ "Mumford & Sons", 
+          Artist == "Sons" ~ "Mumford & Sons",
+          Artist == "Hootie" ~ "Hootie & the Blowfish",
+          Artist == "the Blowfish" ~ "Hootie & the Blowfish",
+          Artist == "Tank" ~ "Tank and the Bangas",
+          Artist == "the Bangas" ~ "Tank and the Bangas",
+          Artist == "Domi" ~ "Domi and JD Beck",
+          Artist == "JD Beck" ~ "Domi and JD Beck",
+          Artist == "The War" ~ "The War & Treaty",
+          Artist == "Treaty" ~ "The War & Treaty",
+          #fix for: artist name = Bramdy, wikipedia = Brandy Norwood
+          Artist == "Brandy" ~ "Brandy Norwood", 
+          TRUE ~ Artist)) %>%
+  distinct(Artist) %>%
+  arrange(Artist) %>%
+  filter(Artist != "the Vanguard") %>% #this is D'Angelo & the Vanguard
+  filter(Artist != "Various Artists") #this is Ray Charles & Various Artists
+
+#create new column for whether the artist is a band:
+artists_df <- artists_df %>%
+  mutate(Band = case_when(Artist %in% c(
+    "ABBA", "Alabama Shakes", "Black Pumas", "Bon Iver", "Boygenius", 
+    "Coldplay", "Daft Punk", "Dave Matthews Band", "Foo Fighters", 
+    "Fun", "Haim", "Imagine Dragons", "Kings of Leon", "Little Big Town", 
+    "Lukas Graham", "Silk Sonic", "The Black Eyed Peas", "The Black Keys", 
+    "Twenty One Pilots", "Vampire Weekend", "Grey", "Hoobastank", 
+    "Mumford & Sons", "Nickelback", "No Doubt", "OutKast","Plain White T's",
+    "Red Hot Chili Peppers", "Santana", "Steely Dan", "The Smashing Pumpkins",
+    "The White Stripes", "U2", "Vampire Weekend", "Hanson", "Aerosmith", 
+    "All-4-One", "Backstreet Boys", "Boyz II Men", "Destiny's Child", 
+    "Dixie Chicks", "Evanescence", "Garbage", "Fugees", "Goo Goo Dolls", 
+    "Gorillaz", "Green Day", "Los Lonely Boys", "	Pearl Jam", "Radiohead", 
+    "Rascal Flatts", "TLC", "Train", "*NSync", "Pearl Jam", 
+    "Gnarls Barkley", "The Beatles", "The Lumineers", "Khruangbin", 
+    "Domi and JD Beck", "Måneskin",  "Wet Leg", "Glass Animals",  
+    "Tank and the Bangas", "Japanese Breakfast",  "Chloe x Halle", 
+    "Greta Van Fleet" , "The Chainsmokers", "Bastille",  "The Band Perry",  
+    "Zac Brown Band", "MGMT", "Silversun Pickups", "The Ting Tings", 
+    "Jonas Brothers", "Lady Antebellum", "Paramore", "Fall Out Boy", "Keane", 
+    "Sugarland", "Maroon 5", "Fountains of Wayne", "Linkin Park", "Papa Roach", 
+    "Hootie & the Blowfish", "Crash Test Dummies", "Counting Crows", 
+    "Ace of Base", "The War & Treaty") ~ 1, TRUE ~ 0))
+
+#get wikipedia page for each artist, manually find
+get_url <- function (artist) {
+  #we need to manually set some URLs because sometimes artist names 
+  #can be other things: like Fun, or Jewel
+  artist_url <- ifelse(artist == "Fun", 
+                       "https://en.wikipedia.org/wiki/Fun_(band)",
+                ifelse(artist == "Haim", 
+                       "https://en.wikipedia.org/wiki/Haim_(band)",
+                ifelse(artist == "Grey", 
+                       "https://en.wikipedia.org/wiki/Grey_(duo)",
+                ifelse(artist == "Khalid", 
+                       "https://en.wikipedia.org/wiki/Khalid_(American_singer)",
+                ifelse(artist == "Logic", 
+                       "https://en.wikipedia.org/wiki/Logic_(rapper)",
+                ifelse(artist == "Maxwell", 
+                       "https://en.wikipedia.org/wiki/Maxwell_(musician)",
+                ifelse(artist == "Gayle", 
+                       "https://en.wikipedia.org/wiki/Gayle_(singer)",
+                ifelse(artist == "Drake", 
+                       "https://en.wikipedia.org/wiki/Drake_(musician)",
+                ifelse(artist == "Miguel", 
+                       "https://en.wikipedia.org/wiki/Miguel_(singer)",
+                ifelse(artist == "Hanson", 
+                       "https://en.wikipedia.org/wiki/Hanson_(band)",
+                ifelse(artist == "Dixie Chicks", 
+                       "https://en.wikipedia.org/wiki/The_Chicks",
+                       #this is because later Dixie chicks renames
+                ifelse(artist == "Garbage", 
+                       "https://en.wikipedia.org/wiki/Garbage_(band)",
+                ifelse(artist == "Seal", 
+                       "https://en.wikipedia.org/wiki/Seal_(musician)",
+                ifelse(artist == "Train", 
+                       "https://en.wikipedia.org/wiki/Train_(band)",
+                ifelse(artist == "TLC", 
+                       "https://en.wikipedia.org/wiki/TLC_(group)",
+                ifelse(artist == "M.I.A.",
+                       "https://en.wikipedia.org/wiki/M.I.A._(rapper)",
+                ifelse(artist == "Usher",
+                       "https://en.wikipedia.org/wiki/Usher_(musician)",
+                ifelse(artist == "Babyface",
+                       "https://en.wikipedia.org/wiki/Babyface_(musician)",
+                ifelse(artist == "Estelle",
+                       "https://en.wikipedia.org/wiki/Estelle_(musician)",
+                ifelse(artist == "Monica",
+                       "https://en.wikipedia.org/wiki/Monica_(singer)",
+                ifelse(artist == "Santana",
+                       "https://en.wikipedia.org/wiki/Santana_(band)",
+                ifelse(artist == "Bastille", 
+                       "https://en.wikipedia.org/wiki/Bastille_(band)",
+                ifelse(artist == "Keane",
+                       "https://en.wikipedia.org/wiki/Keane_(band)",
+                ifelse(artist == "Jill Scott",
+                       "https://en.wikipedia.org/wiki/Jill_Scott_(singer)",
+                ifelse(artist == "Jewel",
+                       "https://en.wikipedia.org/wiki/Jewel_(singer)",
+                ifelse(artist == "Yola", 
+                       "https://en.wikipedia.org/wiki/Yola_(singer)",
+                ifelse(artist == "Jelly Roll",
+                       "https://en.wikipedia.org/wiki/Jelly_Roll_(singer)",
+                ifelse(artist == "James Blake",
+                       "https://en.wikipedia.org/wiki/James_Blake_(musician)",
+                ifelse(artist == "James Bay",
+                       "https://en.wikipedia.org/wiki/James_Bay_(singer)",
+                ifelse(artist == "Feist",
+                       "https://en.wikipedia.org/wiki/Feist_(singer)",
+                ifelse(artist == "Duffy",
+                       "https://en.wikipedia.org/wiki/Duffy_(singer)",
+                ifelse(artist == "David Gray",
+                       "https://en.wikipedia.org/wiki/David_Gray_(British_musician)",
+                ifelse(artist == "Chika",
+                       "https://en.wikipedia.org/wiki/Chika_(rapper)",
+                ifelse(artist == "Ashanti",
+                       "https://en.wikipedia.org/wiki/Ashanti_(singer)",
+                ifelse(artist == "Anitta",
+                       "https://en.wikipedia.org/wiki/Anitta_(singer)",
+                        paste0("https://en.wikipedia.org/wiki/",
+                              str_replace_all(artist, " ", "_")
+                              ))))))))))))))))))))))))))))))))))))
+}
+
+#some bandmembers dont extract properly
+bandmember_fixes <- list(
+  "TLC" = c("Tionne 'T-Boz' Watkins", "Rozonda 'Chilli' Thomas", 
+            "Lisa 'Left Eye' Lopes", "Crystal Jones"),
+  "Los Lonely Boys" = c("Henry Garza", "Jojo Garza", "Ringo Garza"),
+  "Dave Matthews Band" = c("Dave Matthews", "Carter Beauford", "Stefan Lessard", 
+                            "Tim Reynolds", "Rashawn Ross", "Jeff Coffin", 
+                            "Buddy Strong", "LeRoi Moore", "Peter Griesar", 
+                            "Butch Taylor", "Boyd Tinsley"),
+  "Santana" = c("Carlos Santana", "Tommy Anthony", "Ray Greene", 
+                "David K. Mathews", "Paoli Mejías", "Karl Perazzo", 
+                "Benny Rietveld", "Cindy Blackman Santana", "Andy Vargas"),
+  "Gorillaz" = c("Damon Albarn", "Jamie Hewlett", "Remi Kabaka Jr.", 
+                 "Murdoc Niccals", "Russel Hobbs", "2-D", "Noodle", 
+                 "Paula Cracker", "Cyborg Noodle", "Ace"),
+  "Steely Dan" = c("Donald Fagen", "Walter Becker", "Catherine Russell", 
+                   "Carolyn Leonhart", "Michael Leonhart", "Jon Herington", 
+                   "Jim Pugh", "Roger Rosenberg", "Walt Weiskopf", 
+                   "Keith Carlock","Freddie Washington", "La Tanya Hall", 
+                   "Adam Rogers"),
+  "The Beatles" = c("John Lennon", "Paul McCartney", "George Harrison", 
+                    "Ringo Starr"),
+  "Counting Crows" = c("Adam Duritz", "David Bryson", "Charlie Gillingham", 
+                       "Dan Vickrey", "David Immerglück", "Jim Bogios", 
+                       "Millard Powers", "Steve Bowman", "Ben Mize", 
+                       "Matt Malley"),
+  "Crash Test Dummies" = c("Brad Roberts", "Ellen Reid", "Dan Roberts", 
+                           "Mitch Dorge", "Benjamin Darvill", "Daniel Koulack", 
+                           "Vince Lambert", "Curtis Riddell", "George West",
+                           "Mark Crozer", "Marc Mysterio"),
+  "Keane" = c("Tom Chaplin", "Richard Hughes", "Tim Rice-Oxley", "Jesse Quin", 
+              "Dominic Scott"),
+  "Wet Leg" = c("Rhian Teasdale", "Hester Chambers"))
+
+#get band members when its a band
+get_band_members <- function(artist) {
+  
+  if (artist %in% names(bandmember_fixes)) {
+    members_list <- bandmember_fixes[[artist]]
+    
+  } else {
+    
+  artist_url <- get_url(artist)
+  artist_page <- read_html(artist_url)
+  
+  Sys.sleep(2) #between read_html's 
+  
+  #extract all current and past members when normal structure
+  members_list <- artist_page %>%
+    html_nodes(xpath = "//table[contains(@class, 'infobox')]//tr[
+      th[contains(., 'Members') or contains(., 'Past members')]
+    ]/td//li") %>%
+    html_text(trim = TRUE)
+  
+  #sometimes not in li
+  if (length(members_list) == 0) {
+    members_list <- artist_page %>%
+      html_nodes(xpath = "//table[contains(@class, 'infobox')]//tr[
+        th[contains(., 'Members') or contains(., 'Past members')]
+      ]/td") %>%
+      html_text(trim = TRUE) %>%
+      str_replace_all("\\n", "; ")
+  }
+  
+  #clean up
+  members_list <- unique(members_list)
+  members_list <- gsub("\\[.*?\\]", "", members_list) %>% str_trim()
+  }
+  
+  #return NA if empty
+  if (length(members_list) > 0) {
+    return(paste(members_list, collapse = "; "))
+  } else {return(NA)}
+}
+
+#vector with band members
+band_members <- artists_df %>%
+  filter(Band == 1) %>%
+  pull(Artist) %>%
+  setNames(., .) %>%  # Set artist names as names for the vector
+  sapply(get_band_members)
+
+#add the into the df
+artists_df <- artists_df %>%
+  mutate(Wikipedia = sapply(Artist, get_url)) %>%
+  mutate(Band_Members = ifelse
+         (Band == 1, band_members[Artist], NA_character_)) 
+
+print(bands <- artists_df %>% 
+        filter(Band == 1) %>% 
+        select(Artist, Band_Members) %>%
+        .[1:5,])
+
+#remove all these intermediary steps
+rm(band_members, bandmember_fixes)
+
+#function to gather general artist info
+scrape_general_info <- function(url) {
+  Sys.sleep(2)
+  #between read_html
+  page <- read_html(url)
+  
+  birth_date <- page %>%
+    #looks for bday: it is explicitly labeled as such
+    html_node(xpath = "//table[contains(@class, 'infobox')]//
+              tr[th[contains(., 'Born')]]/td//span[@class='bday']") %>%
+    {if (!is.null(.)) {html_text(., trim = TRUE) %>% 
+                        gsub("\\[.*?\\]", "", .)} #remove references
+      else {NA}}
+  
+  country <- page %>%
+    html_node(xpath = "//table[contains(@class, 'infobox')]//
+              tr[th[contains(., 'Born')]]/td") %>%
+    html_text(trim = TRUE) %>%
+    gsub("\\[.*?\\]", "", .) %>%  #remove references
+    str_split("\\n|, ") %>%  #split into list of elements
+    .[[1]] %>%  #only keep first element, which has place of birth
+    keep(~ grepl("[a-zA-Z]", .)) %>%  #only keep elements with letters
+    tail(1) %>%  #last element of place of birth is the country
+    str_trim()
+  
+  occupation <- page %>%
+    html_node(xpath = "//table[contains(@class, 'infobox')]//
+              tr[th[contains(., 'Occupation')]]/td") %>%
+    {if (!is.null(.)) {
+      if (length(html_nodes(., "li")) > 0) { #sometimes as list
+      html_nodes(., "li") %>% html_text(trim = TRUE) %>% 
+          paste(collapse = "; ") %>% #separate items with semicolons
+          #clean up
+          str_replace_all("-", "; ") %>%
+          str_replace_all(",", "; ") %>% 
+          str_remove_all("\\[.*?\\]") %>% #removes references
+          str_to_lower() %>%
+          str_trim()} 
+      else {html_text(., trim = TRUE) %>% #sometimes not in a list
+          gsub("\\[.*?\\]", "", .) %>% 
+          str_replace_all("-", "; ") %>%
+          str_replace_all(",", "; ") %>% 
+          str_remove_all("\\[.*?\\]") %>% 
+          str_to_lower() %>%
+          str_trim()}}
+      else {NA}}
+  
+  years_active <- page %>%
+    ### * i needed chatgpt to help me debug this, specifically:  
+    html_node(xpath = "//table[contains(@class, 'infobox')]//
+              tr[th[contains(translate(., ' ', ' '), 'Years active')]]/td") %>%
+    #line above converts non-breaking space to regular space
+    html_text(trim = TRUE) %>%
+    gsub("\\[.*?\\]", "", .) %>% 
+    str_trim()
+  
+  genres <- page %>%
+    html_node(xpath = "//table[contains(@class, 'infobox')]//
+              tr[th[contains(., 'Genres')]]/td") %>%
+    html_nodes("li") %>%  #sometimes as list
+    html_text(trim = TRUE) %>%
+    gsub("\\[.*?\\]", "", .) %>%
+    paste(collapse = "; ")  #separate items with semicolons
+  
+  if (is.na(genres) || genres == "") {
+    genres <- page %>% #sometimes not as list
+      html_nodes(xpath = "//table[contains(@class, 'infobox')]//
+                 tr[th[contains(., 'Genres')]]/td") %>%
+      html_text(trim = TRUE) %>%
+      gsub("\\[.*?\\]", "", .) %>% #remove references
+      paste(collapse = "; ")} #separate items with semicolons
+  
+  labels <- page %>%
+    html_node(xpath = "//table[contains(@class, 'infobox')]//
+              tr[th[contains(., 'Labels')]]/td") %>%
+    html_nodes("li") %>% 
+    html_text(trim = TRUE) %>%
+    gsub("\\[.*?\\]", "", .) %>% #remove references
+    paste(collapse = "; ") #separate items with semicolons
+  
+  if (is.na(labels) || labels == "") {
+    labels <- page %>%
+      html_nodes(xpath = "//table[contains(@class, 'infobox')]//
+                 tr[th[contains(., 'Labels')]]/td") %>%
+      html_text(trim = TRUE) %>%
+      gsub("\\[.*?\\]", "", .) %>%
+      paste(collapse = "; ")}
+  
+  #create df with extracted info
+  data.frame(Birth_Date = ifelse(length(birth_date) == 0, NA, birth_date),
+             Country = ifelse(length(country) == 0, NA, country),
+             Occupation = ifelse(length(occupation) == 0, NA, occupation),
+             Years_Active = ifelse(length(years_active) == 0, NA, years_active),
+             Genres = ifelse(length(genres) == 0, NA, genres),
+             Labels = ifelse(length(labels) == 0, NA, labels),
+             stringsAsFactors = FALSE)
+}
+
+#apply function to artists
+artist_info <- sapply(artists_df$Wikipedia, scrape_general_info, 
+                      simplify = FALSE) #to return as list rather than vector
+
+#add info into df
+artists_df <- artists_df %>%
+  #extracts the corresponding values from previously created list
+  mutate(Birth_Date = sapply(artist_info, function(x) x$Birth_Date),
+         Country = sapply(artist_info, function(x) x$Country),
+         Occupation = sapply(artist_info, function(x) x$Occupation),
+         Years_Active = sapply(artist_info, function(x) x$Years_Active),
+         Genres = sapply(artist_info, function(x) x$Genres),
+         Labels = sapply(artist_info, function(x) x$Labels))
+
+#for bands, need different selector/logic to extract country
+scrape_band_info <- function(url) {
+  Sys.sleep(2)
+  page <- read_html(url)
+
+  country <- page %>%
+    html_node(xpath = "//table[contains(@class, 'infobox')]//
+              tr[th[contains(., 'Origin')]]/td") %>%
+    {if (!is.null(.)) {
+      html_text(., trim = TRUE) %>%
+          gsub("\\[.*?\\]", "", .) %>%  
+          str_trim() %>%  
+          str_split(",") %>%
+          .[[1]] %>%
+          tail(1) %>% #only keep the country
+          str_trim()} 
+      else {NA}}
+  
+  return(country)
+}
+
+artists_df <- artists_df %>%
+  mutate(Country = if_else
+         (Band == 1, sapply(Wikipedia, scrape_band_info), Country))
+
+#clean what we've extracted: 
+#fix years_active, because not always formatted correctly
+years_fixes <- list("*NSync" = c("1995-2004", "2013-2019", "2023-2024"),
+                    "Alabama Shakes" = "2009-2018",
+                    "Destiny's Child" = c("1997-2006", "2013-2018"),
+                    "Foo Fighters" = "1994-present","All-4-One" = "1993-present",
+                    "Fugees" = c("1990-1998", "2021-present"),
+                    "Garbage" = c("1993-2005", "2007", "2010-present"),
+                    "Gnarls Barkley" = c("2003-2010", "2013-present"),
+                    "Grey" = "2015-present", "Haim" = "2007-present",
+                    "Kings of Leon" = "1999-present",
+                    "Los Lonely Boys" = c("1996-2019", "2022-present"),
+                    "No Doubt" = c("1986-2005", "2008-2015", "2024-present"),
+                    "Rascal Flatts" = c("1999-2021", "2024-present"),
+                    "Red Hot Chili Peppers" = "1982-present",
+                    "Steely Dan" = c("1971-1981, 1993-present"),
+                    "The Black Eyed Peas" = c("1995-2011", "2015-present"),
+                    "The Smashing Pumpkins" = c("1988-2000", "2006-present"),
+                    "Ryan Lewis" = "2006-present", "Sia" = "1997-present", 
+                    "OutKast" = c("1992-2007","2014"),
+                    "Jonas Brothers" = c("2005-2013", "2019-present"),
+                    "Sugarland" = c("2002-2012", "2017-2020", "2024-present"),
+                    "Keane" = c("1995-2014", "2018-present"),
+                    "Arooj Aftab" = c("2010-present"), 
+                    "Yola" = "2016-present")
+
+artists_df <- artists_df %>%
+  rowwise() %>%
+  mutate(Years_Active = 
+           if (Artist %in% names(years_fixes)) {paste(years_fixes[[Artist]], 
+                                                      collapse = "; ")} 
+         else {Years_Active},
+         
+         Years_Active = str_remove_all(Years_Active, "\\(.*?\\)"),
+         Years_Active = str_replace_all(Years_Active, ",", ";"),  
+         Years_Active = str_replace_all(Years_Active, "\\n", ";")) %>%
+  ungroup()
+
+
+#birth date for bands is the date of formation aka 
+#the first year of years_active, 
+#we add 01-01 for consistency, to format as date
+artists_df <- artists_df %>%
+  mutate(Birth_Date = case_when(Artist == "Maxwell" ~ "1973-05-23",
+                                #had to fix manually Maxwell's bday
+                                Band == 1 ~ str_extract(Years_Active, "\\d{4}"),
+                                TRUE ~ Birth_Date),
+         Birth_Date = case_when(Band == 0 ~ as.Date(Birth_Date, 
+                                                    format = "%Y-%m-%d"),
+                                Band == 1 ~ as.Date(paste0(Birth_Date, "-01-01"), 
+                                                    format = "%Y-%m-%d"),
+                                TRUE ~ NA_Date_))
+
+#fix Country
+artists_df <- artists_df %>%
+  mutate(Country = str_replace_all(Country, "United States", "U.S."),
+         Country = str_replace_all(Country, "US", "U.S."),
+         Country = str_replace_all(Country, "U.s.", "U.S."),
+         #make U.S. consistent
+         Country = str_replace_all(Country, "India\\)", "India"),
+         Country = str_replace_all(Country, "U.K.", "England"),
+         Country = str_replace_all(Country, "Louisiana", "U.S."),
+         #the only person for whom it says U.K. is from Leeds therefore England
+         Country = str_replace_all(Country, 
+                                   "Soviet Union \\(present-day Russia\\)", 
+                                   "Russia")) %>%
+         #Zedd was born in the Soviet Union, in a part that is now Russia
+  #for some artists country didnt extract at all so manually fix
+  mutate(Country = case_when(Artist == "Paula Cole" ~ "U.S.",
+                             Artist == "JP Saxe" ~ "Canada",
+                             Artist == "Adele" ~ "England",
+                             Artist == "Arlo Parks" ~ "England",
+                             Artist == "Brandy Clark" ~ "U.S.",
+                             Artist == "Shelby Lynne" ~ "U.S.",
+                             Artist == "Teddy Swims" ~ "U.S.",
+                             Artist == "The War & Treaty" ~ "U.S.",
+                             Artist == "The Tony Rich Project" ~ "U.S.",
+                             Artist == "J. Cole" ~ "Germany",
+                             TRUE ~ Country))
+
+#fix genres and labels for the specific artists for which it didnt work
+faulty_genres <- list("José Carreras" = c("classical", "opera"), 
+                      "LeAnn Rimes" = c("country", "pop", "adult contemporary", 
+                                        "contemporary Christian", "pop rock", 
+                                        "dance-pop"), 
+                      "Luciano Pavarotti" = c("classical", "opera"), 
+                      "Plácido Domingo" = c("classical", "opera", "latin"), 
+                      "Zubin Mehta" = "classical",
+                      "Noah Cyrus" = c("pop", "country", "bluegrass", "dance"))
+
+faulty_labels <- list("José Carreras" = c("Philips", 
+                                          "Deutsche Grammophon"), 
+                      "LeAnn Rimes" = "Curb Records", 
+                      "Luciano Pavarotti" = c("Decca Records", "London Records"), 
+                      "Plácido Domingo" = c("EMI", "Sony Classical"), 
+                      "Zubin Mehta" = c("Decca Records", "Sony Classical", 
+                                        "Deutsche Grammophon"),
+                      "Diana Krall" = c("Justin Time", "GRP", "Impulse", "Verve"),
+                      "Jill Scott" = c("Hidden Beach", "Warner Bros.", "Atlantic"),
+                      "Julia Michaels" = "Republic", 
+                      "Natalie Imbruglia" = c("RCA; BMG", "Island", "Sony Music"),
+                      "Chance The Rapper" = c("RCA", "Chance The Rapper", "1009",
+                                              "CHANCE"))
+
+artists_df <- artists_df %>%
+  mutate(Genres = case_when(
+    Artist == "José Carreras" ~ paste(faulty_genres[["José Carreras"]],
+                                      collapse = "; "),
+    Artist == "LeAnn Rimes" ~ paste(faulty_genres[["LeAnn Rimes"]],
+                                    collapse = "; "),
+    Artist == "Luciano Pavarotti" ~ paste(faulty_genres[["Luciano Pavarotti"]],
+                                          collapse = "; "),
+    Artist == "Plácido Domingo" ~ paste(faulty_genres[["Plácido Domingo"]],
+                                        collapse = "; "),
+    Artist == "Zubin Mehta" ~ paste(faulty_genres[["Zubin Mehta"]],
+                                    collapse = "; "),
+    Artist == "Noah Cyrus" ~ paste(faulty_genres[["Noah Cyrus"]],
+                                  collapse = "; "),
+    TRUE ~ Genres),
+    
+    Labels = case_when(
+      Artist == "José Carreras" ~ paste(faulty_labels[["José Carreras"]],
+                                        collapse = "; "),
+      Artist == "LeAnn Rimes" ~ paste(faulty_labels[["LeAnn Rimes"]],
+                                      collapse = "; "),
+      Artist == "Luciano Pavarotti" ~ paste(faulty_labels[["Luciano Pavarotti"]],
+                                            collapse = "; "),
+      Artist == "Plácido Domingo" ~ paste(faulty_labels[["Plácido Domingo"]],
+                                          collapse = "; "),
+      Artist == "Zubin Mehta" ~ paste(faulty_labels[["Zubin Mehta"]],
+                                      collapse = "; "), 
+      Artist == "Diana Krall" ~ paste(faulty_labels[["Diana Krall"]],
+                                     collapse = "; "),
+      Artist == "Jill Scott" ~ paste(faulty_labels[["Jill Scott"]],
+                                     collapse = "; "),
+      Artist == "Julia Michaels" ~ paste(faulty_labels[["Julia Michaels"]],
+                                        collapse = "; "),
+      Artist == "Natalie Imbruglia" ~ paste(faulty_labels[["Natalie Imbruglia"]],
+                                           collapse = "; "),
+      Artist == "Chance The Rapper" ~ paste(faulty_labels[["Chance The Rapper"]],
+                                           collapse = "; "),
+      TRUE ~ Labels))
+
+#clean occupation
+artists_df <- artists_df %>%
+  mutate(Occupation = str_replace_all(Occupation, "-", "; ") %>%
+           str_replace_all(",", "; ") %>% 
+           str_remove_all("\\[.*?\\]") %>% 
+           str_to_lower()) %>%
+  mutate #label and genre for format
+
+#set as factor
+artists_df <- artists_df %>%
+  mutate(Country = as.factor(Country))
+
+print(biography <- artists_df %>% 
+        filter(Band == 0) %>%
+        select(Artist, Birth_Date, Country, Occupation, 
+               Years_Active, Genres, Labels) %>%
+        .[1:5,])
+
+rm (artist_info, faulty_genres, faulty_labels, years_fixes)
+
+```
+
+Finally, specialized functions scraping keywords to determine artists’ `Gender` and `Descent` were used. Several challenges arose, many mixed-gender bands are predominantly male, and sometimes do not even currently have female members. In this case, we coded as `Mixed` if the female member played a significant role, historically, and/or was presentduring the nomination. We made several decisions regarding assigning descent categories. These decisions, while subjective, were made to reflect differences in how artists experience representation. The categories are: `African`, `Caribbean`, `Middle Eastern`, `South Asian`, `East Asian`, `Latin American`, `American`, `Canadian`, `European`, and `Oceania`. One key distinction was separating South Asia from East Asia. South Asia encompasses countries like India, Sri Lanka, and the Philippines, while East Asia includes China, Japan, and Korea, which have distinct cultural and historical contexts. We also chose to treat the Caribbean separately from Latin America due to the region's unique history and demographic makeup. Moreover, the Grammy Awards being a U.S.-based institutions, we found relevant to separate Canadian artists from Americans.
+
+```{r gender and descent}
+#now get gender and add to df
+scrape_gender <- function(url) {
+  Sys.sleep(0.5)
+  page <- read_html(url)
+  
+  # Extract all category links in the "catlinks" section
+  categories <- page %>%
+    html_nodes("#catlinks li a") %>%
+    html_text(trim = TRUE) %>%
+    tolower()
+  
+  #define keywords for gender
+  female_keywords <- "\\b(female|woman|women|ladies|girl|girls)\\b"
+  male_keywords <- "\\b(male|man|men|gentleman|gentlemen|boy|boys)\\b"
+  has_female <- any(str_detect(categories, female_keywords))
+  has_male <- any(str_detect(categories, male_keywords))
+  
+  if (has_female && has_male) {return("Mixed")} 
+  else if (has_female) {return("Female")} 
+  else if (has_male) {return("Male")} 
+  else {return(NA)}
+}
+
+#add to df
+artists_df <- artists_df %>%
+  mutate(Gender = sapply(artists_df$Wikipedia, scrape_gender)) %>%
+  select(Artist, Birth_Date, Country, Gender, Band, Band_Members, Occupation, 
+         Years_Active, Genres, Labels, Wikipedia)
+
+#clean gender
+artists_df <- artists_df %>%
+  mutate(Gender = case_when(
+    #some female keywords come up on male singers or on mixed bands at times, 
+    #recode some male
+    Artist %in% c("R. Kelly", "Zedd", "Zubin Mehta", "Aerosmith", "Black Pumas", 
+                  "Coldplay", "Dave Matthews Band", "Foo Fighters", 
+                  "Gnarls Barkley", "Goo Goo Dolls", "Fun", "Green Day", "Grey", 
+                  "Hoobastank", "Imagine Dragons", "Kings of Leon", 
+                  "Los Lonely Boys", "Lukas Graham", "Mumford & Sons", 
+                  "Nickelback", "Plain White T's", "Radiohead", "Rascal Flatts", 
+                  "Red Hot Chili Peppers", "The Beatles", "U2", "Puff Daddy",
+                  "Vampire Weekend", "Train", "Bastille", "Jonas Brothers", 
+                  "Keane", "Glass Animals", "Greta Van Fleet", 
+                  "Hootie & the Blowfish", "Fountains of Wayne", "Maroon 5", 
+                  "Papa Roach", "Counting Crows", "Zac Brown Band", "D Smoke", 
+                  "Lil Uzi Vert", "Skrillex", "Tobe Nwigwe", "Kaytranada") 
+    ~ "Male",
+    #recode some mixed
+    Artist %in% c("ABBA", "Alabama Shakes", "Bon Iver", "Fugees", "Evanescence", 
+                  "Gorillaz", "Little Big Town", "Santana", "The Black Eyed Peas", 
+                  "Garbage", "No Doubt", "Steely Dan", "Ace of Base", 
+                  "Japanese Breakfast", "Linkin Park", "Paramore", "Måneskin",
+                  "The Band Perry", "The War & Treaty", "Khruangbin", 
+                  "Lady Antebellum", "Silversun Pickups", "The Smashing Pumpkins",
+                  "Tank and the Bangas", "Crash Test Dummies", "The Lumineers") 
+    ~ "Mixed",
+    #two non-binary 
+    Artist == "Janelle Monáe" ~ "Non-Binary",
+    Artist == "Sam Smith" ~ "Non-Binary",
+    Artist == "Margo Price" ~ "Female",
+    TRUE ~ Gender
+  ))
+
+#now do descent
+scrape_descent <- function(url) {
+  page <- read_html(url)
+  
+  categories <- page %>%
+    html_nodes("#catlinks li a") %>%
+    html_text(trim = TRUE) %>%
+    tolower()
+  
+  #first remove categories containing 'activist' as these skew the findings
+  categories <- categories[!str_detect(categories, "\\bactivist(s)?\\b")]
+  
+  #find the broad lists such as 21st Century African-American Actors
+  american_categories <- categories[str_detect(categories,"\\b(african-american|
+  black|afro|african|asian-american|mexican-american|native-american)\\b")]
+  
+  #extract any line containing the word descent
+  descent_categories <- categories[str_detect(categories, "\\bdescent\\b")]
+  
+  all_extracted <- unique(c(american_categories,descent_categories))
+  
+  # Return results as a data frame
+  if (length(all_extracted) > 0) {
+    return(data.frame(Descent = all_extracted, stringsAsFactors = FALSE))
+  } else {
+    return(data.frame(Descent = NA, stringsAsFactors = FALSE))
+  }
+}
+
+#we define key words to help us categorize descent
+categories <- list(European = "(welsh|english|french|hungarian|irish|italian|
+                scottish|german|sicilian|abruzzese|norwegian|swedish|acadian|
+                dutch|spanish|danish|armenian|polish|swiss|luxembourgian|
+                croatian|corsican|basque|canarian|swiss-french|swiss-italian|
+                albanian|kosovan|french-canadian|azorean)",
+Canadian = "french-canadian",
+Caribbean = "(jamaican|puerto rican|caribbean|dominican republic|
+              trinidad and tobago|grenadian|haitian|barbados|creole)",
+African = "(african|south african|african-american|senegalese|bissau-guinean|
+            ulbe|liberian|mende|sierra leonean|nigerian|ethiopian)",
+South_Asian = "(filipino|indian|gujarati|bengali|sri lankan tamil)",
+East_Asian = "(chinese|japanese|asian|korean)",
+Middle_Eastern = "(palestinian|turkish-jewish)",
+Latin_American = "(ecuadorian|venezuelan|mexican|brazilian|colombian)")
+
+extract_keywords <- function(descent_list, categories) {
+  all_matches <- unlist(sapply(categories, function(regex) {
+    str_extract_all(unlist(descent_list), regex)
+  }))
+  unique(all_matches)
+}
+
+artists_df <- artists_df %>%
+  mutate(Descent = sapply(artists_df$Wikipedia, scrape_descent)) %>%
+  bind_rows() %>% rowwise() %>%
+  mutate(Descent = paste(extract_keywords(Descent, categories), collapse = ", "),
+         #apply the function to categories
+         Categories = paste(names(categories)
+                            [sapply(categories, function(regex) {
+                              any(str_detect(Descent, regex))})], 
+                            collapse = ", ")) %>%
+  ungroup() %>%
+  select(Artist, Birth_Date, Country, Gender, Categories, Band, Band_Members, 
+         Occupation, Years_Active, Genres, Labels, Wikipedia) %>%
+  rename(Descent = Categories)
+
+#add to the descent categories their country of birth
+artists_df <- artists_df %>%
+  mutate(Descent = case_when(
+    Country %in% c("Sweden", "England", "France", "Belgium", "Ireland", "Spain", 
+                     "Scotland", "Italy", "Denmark", "U.K.", "Wales", "Germany") ~ 
+      ifelse(is.na(Descent) | Descent == "", "European", 
+             ifelse(str_detect(Descent, "\\bEuropean\\b"), 
+                    Descent, paste0(Descent, "; European"))),
+    Country == "U.S." ~ 
+      ifelse(is.na(Descent) | Descent == "", "American",
+             ifelse(str_detect(Descent, "\\bAmerican\\b"), 
+                    Descent, paste0(Descent, "; American"))),
+    Country == "Canada" ~ 
+      ifelse(is.na(Descent) | Descent == "", "Canadian", 
+             ifelse(str_detect(Descent, "\\bCanadian\\b"), 
+                    Descent, paste0(Descent, "; Canadian"))),
+    Country %in% c("Puerto Rico", "Barbados", "Trinidad and Tobago", 
+                   "Jamaica", "Haiti") ~ 
+      ifelse(is.na(Descent) | Descent == "", "Caribbean", 
+             ifelse(str_detect(Descent, "\\bCaribbean\\b"), 
+                    Descent, paste0(Descent, "; Caribbean"))),
+    Country %in% c("Australia", "New Zealand") ~ 
+      ifelse(is.na(Descent) | Descent == "", "Oceania", 
+             ifelse(str_detect(Descent, "\\bOceania\\b"), 
+                    Descent, paste0(Descent, "; Oceania"))),
+    Country %in% c("Colombia", "Brazil") ~ 
+      ifelse(is.na(Descent) | Descent == "", "Latin_American", 
+             ifelse(str_detect(Descent, "\\bLatin_American\\b"), 
+                    Descent, paste0(Descent, "; Latin_American"))),
+    Country == "India" ~ 
+      ifelse(is.na(Descent) | Descent == "", "South_Asian", 
+             ifelse(str_detect(Descent, "\\bSouth_Asian\\b"), 
+                    Descent, paste0(Descent, "; South_Asian"))),
+    Country == "Saudi Arabia" ~ 
+      ifelse(is.na(Descent) | Descent == "", "Middle_Eastern", 
+             ifelse(str_detect(Descent, "\\bMiddle_Eastern\\b"), 
+                    Descent, paste0(Descent, "; Middle_Eastern"))),
+    TRUE ~ Descent),
+    Descent = str_replace_all(Descent, ",", ";")) %>%
+  #remove duplicates
+  mutate(Descent = sapply(str_split(Descent, ";\\s*"), 
+                          function(x) paste(unique(trimws(x)), collapse = "; "))) 
+
+print(gender_descent <- artists_df %>% 
+        select(Artist, Gender, Descent, Country, Band) %>%
+        .[5:10,])
+
+rm(extract_keywords, categories)
+```
+
+## 4. A Relational Database:
+
+Our artists dataset contains several columns, many of these columns could be considered untidy. Specifically, columns like `Genres`, `Labels`, `Occupation`, `Years_Active`, and `Descent` contain multiple values in one cell.
+
+*Genres*: To study genre-specific patterns and trends, such as whether certain genres are favored in the General Categories, we pivot the `Genres` column to identify which artists belong to which genres.
+
+```{r genres_df}
+
+#count which is the longest list of genres, to pivot into new columns
+max_genres <- artists_df %>%
+  mutate(Genre_Count = str_count(Genres, ";") + 1) %>%
+  summarize(Max_Genres = max(Genre_Count, na.rm = TRUE)) %>%
+  pull(Max_Genres) 
+
+genres_df <- artists_df %>%
+  mutate(Genres = str_replace_all(Genres, ", ", "; ")) %>%
+  separate(col = Genres, into = paste0("Genre_", 1:max_genres), 
+           sep = "; ", fill = "right") %>%
+  mutate(across(starts_with("Genre_"),~ str_to_lower(.) %>%
+      str_remove_all("\\(.*?\\)") %>% str_trim())) %>%
+  select(Artist, starts_with("Genre_"))
+
+#need to fix some duplicates
+genres_df <- genres_df %>%
+  mutate(across(starts_with("Genre_"), 
+                ~ case_when(str_detect(., "dance-pop|dance-rock|folk-pop|pop-rap") 
+                            ~ str_replace_all(., "-", " "),
+                            str_detect(., "\\bhip hop\\b") 
+                            ~ str_replace_all(., "\\bhip hop\\b", "hip-hop"),
+                            str_detect(., "neotraditionalist country") 
+                            ~ str_replace_all(., "neotraditionalist country", 
+                                              "neotraditional country"),
+                            str_detect(., "rhythm and blues") 
+                            ~ str_replace_all(., "rhythm and blues", "r&b"),
+                            TRUE ~ .)))
+
+
+genres_df <- genres_df %>%
+  pivot_longer(cols = starts_with("Genre_"), names_to = "Genre_Column", 
+               values_to = "Genre") %>%
+  filter(!is.na(Genre)) %>%
+  group_by(Genre) %>%
+  summarize(Artists = paste(Artist, collapse = ", "), .groups = "drop") %>%
+  slice(-1) %>%  #first row is bradley cooper with no genres
+  mutate(Artist_Count = str_count(Artists, ",") + 1)
+
+rm(max_genres)
+
+print(preview_genres <- genres_df %>%
+        arrange(desc(Artist_Count)) %>%
+        select(Genre, Artist_Count) %>%
+        .[1:10,])
+```
+
+*Labels*: Similarly, to analyze whether artists signed to certain labels are more successful, being nominated more, or with higher win rates, we picot the `Labels` column.
+
+```{r labels_df}
+
+#count which is the longest list of labels, to pivot into new columns
+max_labels <- artists_df %>%
+  mutate(Label_Count = str_count(Labels, ";") + 1) %>% 
+  summarize(Max_Labels = max(Label_Count, na.rm = TRUE)) %>%
+  pull(Max_Labels)
+
+labels_df <- artists_df %>%
+   mutate(Labels = str_replace_all(Labels, "/", "; ") %>% str_trim()) %>%
+  separate(col = Labels, into = paste0("Label_", 1:max_labels),
+    sep = "; ", fill = "right") %>%
+  mutate(across(starts_with("Label_"),~ str_to_lower(.) %>%
+      str_remove_all("\\(.*?\\)") %>% str_trim())) %>%
+  mutate(across(starts_with("Label_"), 
+                ~ case_when(
+                  #some are the same label with slightly different names
+                  str_detect(., "\\bvirgin emi\\b") ~ "emi",
+                  str_detect(., "\\bs\\b") ~ "syco music",
+                  str_detect(., "\\be1 music\\b") ~ "e1",
+                  str_detect(., "\\buniversal republic records|universal republic\\b") 
+                  ~ "republic records",
+                  str_detect(., "\\bcurb\\b") ~ "curb records",
+                  str_detect(., "\\bconcord bicycle\\b") ~ "concord",
+                  
+                  #merge regional branches into parent label
+                  str_detect(., "\\bcbs ireland\\b") ~ "cbs",
+                  str_detect(., "\\bmonument nashville\\b") ~ "monument",
+                  str_detect(., "\\bmercury nashville\\b") ~ "mercury",
+                  str_detect(., "\\barista nashville\\b") ~ "arista",
+                  str_detect(., "\\bada france\\b") ~ "ada",
+                  str_detect(., "\\batlantic nashville\\b") ~ "atlantic",
+                  str_detect(., "\\bemi america|emi canada|emi nashville\\b") 
+                  ~ "emi",
+                  str_detect(., "\\bdecca|decca nashville\\b") ~ "decca records",
+                  str_detect(., "\\bcapitol latin|capitol nashville\\b") 
+                  ~ "capitol",
+                  
+                  str_detect(., "\\bwarner bros.|warner bros. nashville|warner music\\b")
+                  ~ "warner",
+                  str_detect(., "\\buniversal|universal latin|universal latino|
+                             universal music|universal music canada|universal music latin\\b") 
+                  ~ "universal",
+                  str_detect(., "\\bsony classical|sony latin|sony mexico|sony urban\\b") 
+                  ~ "sony",
+                  str_detect(., "\\brca inspiration|rca nashville|rca victor\\b") 
+                  ~ "rca",
+                  str_detect(., "\\bmca canada|mca music, inc.|mca nashville\\b")
+                  ~ "mca",
+                  str_detect(., "\\bcolumbia nashville\\b")
+                  ~ "columbia",
+                  TRUE ~ .))) %>% 
+  select(Artist, starts_with("Label_"))
+
+labels_df <- labels_df %>%
+  pivot_longer(cols = starts_with("Label_"), names_to = "Label_Column", 
+               values_to = "Label") %>%
+  filter(!is.na(Label)) %>%
+  group_by(Label) %>%
+  summarize(Artists = paste(Artist, collapse = ", "), .groups = "drop") %>%
+  slice(-1) %>%  #first row is bradley cooper with no labels
+  mutate(Artist_Count = str_count(Artists, ",") + 1)
+
+print(preview_labels <- labels_df %>%
+        arrange(desc(Artist_Count)) %>%
+        select(Label, Artist_Count) %>%
+        .[1:10,])
+
+rm(max_labels)
+```
+
+*Descent*: We perform a similar pivoting process for `Descent`, where we save each artist under their `Descent` along with the keyword that put the artist in this category.
+
+```{r descent_df}
+
+max_descent <- artists_df %>%
+  mutate(Descent_Count = str_count(Descent, ";") + 1) %>%
+  summarize(Max_Descent = max(Descent_Count, na.rm = TRUE)) %>%
+  pull(Max_Descent)
+
+descent_df <- artists_df %>%
+  mutate(Descent = str_replace_all(Descent, ", ", "; ")) %>%
+  separate(col = Descent, into = paste0("Descent_", 1:max_descent), 
+           sep = "; ", fill = "right") %>%
+  mutate(across(starts_with("Descent_"), ~ str_to_lower(.) %>%
+                  str_remove_all("\\(.*?\\)") %>% str_trim())) %>%
+  select(Artist, starts_with("Descent_"))
+
+descent_df <- descent_df %>%
+  pivot_longer(cols = starts_with("Descent_"), names_to = "Descent_Column", 
+               values_to = "Descent") %>%
+  filter(!is.na(Descent)) %>%  
+  group_by(Descent) %>%  #group by categories
+  summarize(Artists = paste(Artist, collapse = "; "), .groups = "drop") %>% 
+  mutate(Artist_Count = str_count(Artists, ";") + 1) 
+
+print(preview_descent <- descent_df %>%
+        arrange(desc(Artist_Count)) %>%
+        select(Descent, Artist_Count))
+rm(max_descent)
+
+```
+
+*Years Active*: The `Years_Active` column is not particularly useful for analysis in its current form. Therefore, we transform it into two new variables: `Total_Years_Active`, counting the duration of activity, and `Currently_Active`, a binary variable coded as 1 if the artist is currently active and 0 if not. This enables us to analyze the impact of an artist's career longevity on their success. These transformations are saved separately as a relational dataset to help us track genre-, label-, and descent-specific patterns in the data, but also to keep instance of activity.
+
+```{r years_active_df}
+
+artists_df <- artists_df %>%
+  mutate(Years_Active = Years_Active %>%
+           gsub(",", ";", .) %>%
+           gsub("present", "2025", ., ignore.case = TRUE))
+
+max_years <- artists_df %>%
+  mutate(Years_Count = str_count(Years_Active, ";") + 1) %>%
+  summarize(Max_Years = max(Years_Count, na.rm = TRUE)) %>%
+  pull(Max_Years)
+
+artists_df <- artists_df %>%
+  separate(col = Years_Active, into = paste0("Years_Active_", 1:max_years),
+           sep = ";", fill = "right",extra = "merge") %>%
+  mutate(across(starts_with("Years_Active_"), ~ str_trim(.))) %>%
+  rowwise() %>%
+  mutate(Currently_Active = 
+            if_else(any(str_detect(c_across(starts_with("Years_Active_")), "2025"), 
+                        na.rm = TRUE),1,0)) %>%
+  ungroup()
+
+#calculate total years active
+calculate_years_active <- function(year_range) {
+  if (is.na(year_range)) {return(0)} 
+  else if (str_detect(year_range, "\\d{4}")) {
+    years <- str_extract_all(year_range, "\\d{4}")[[1]]
+    if (length(years) >= 2) {
+      return(as.numeric(years[length(years)]) - as.numeric(years[1]))}
+    else if (length(years) == 1) {return(1)}
+    else {return(0)}}
+  else {return(0)}
+}
+
+years_active_save <- artists_df %>%
+  select(Artist, Band, Gender, starts_with("Years_Active_"))
+ 
+
+artists_df <- artists_df %>% rowwise() %>%
+  mutate(Total_Years_Active = sum(
+    calculate_years_active(Years_Active_1),
+    calculate_years_active(Years_Active_2),
+    calculate_years_active(Years_Active_3),
+    na.rm = TRUE)) %>%
+  ungroup() %>% 
+  select(-starts_with("Years_Active_"))
+
+```
+
+*Nominations and Wins*: For each artist we add a column counting their nominations and wins at the Grammy Awards since 1995. We also create `Win_Rate` calculating the ration of wins to nominations.
+
+```{r create nomination and wins columns}
+
+#count occurances of each artist in all_grammys
+artists_df <- artists_df %>%
+  rowwise() %>% 
+  mutate(Total_nominations = sum(str_detect(all_grammys$Artist, 
+                                            fixed(Artist, ignore_case = TRUE))))
+
+#count occurances of each artist only if they won
+wins_grammys <- all_grammys %>%
+  filter(Winner == TRUE) #we keep for future analysis
+
+artists_df <- artists_df %>%
+  mutate(Total_wins = sapply(Artist, function(artist_name) {
+      sum(str_detect(wins_grammys$Artist, fixed(artist_name, 
+                                                ignore_case = TRUE)))}))
+#calculate win rate for each artist
+artists_df <- artists_df %>%
+  mutate(Win_rate = Total_wins/Total_nominations)
+
+print(win_rates <- artists_df %>%
+        arrange(desc(Win_rate)) %>%
+        filter(Total_nominations > 5) %>%
+        select(Artist, Total_nominations, Total_wins, Win_rate) %>%
+        .[1:5,]) 
+```
+
+## 5. Gender and Descent Analysis:
+
+*Descent-Based Analysis (White vs. Non-White)*: Artists who fall into any of these categories: African, Caribbean, Middle Eastern, South Asian, East Asian, or Latin American are classified as Non-White. We will create pie charts to visualize the proportion of nominations and the proportion of wins between White and Non-White artists.
+
+```{r descent piecharts}
+
+#define categories that are non-white
+#we do not include indigenous here because the descent goes far back
+non_white_keywords <- c("african", "caribbean", "middle_eastern", 
+                        "south_asian", "east_asian", "latin_american")
+
+#calculate the proportions of nominations
+proportions_nominations <- artists_df %>%
+  mutate(Descent_Category = 
+           ifelse(str_detect(str_to_lower(Descent), 
+                             paste(non_white_keywords, collapse = "|")),
+                  "Non-White",
+                  "White")) %>%
+  rowwise() %>%
+  mutate(Total_Nominations = sum(
+    str_detect(all_grammys$Artist, fixed(Artist, ignore_case = TRUE)))) %>%
+  group_by(Descent_Category) %>%
+  summarize(Total_Nominations = sum(Total_Nominations, na.rm = TRUE)) %>%
+  mutate(Proportion = Total_Nominations / sum(Total_Nominations))
+
+#calculate win proportions, ie out of all wins how many non-white
+proportions_wins <- artists_df %>%
+  mutate(Descent_Category = 
+           ifelse(str_detect(str_to_lower(Descent), 
+                             paste(non_white_keywords, collapse = "|")),
+                  "Non-White",
+                  "White")) %>%
+  rowwise() %>%
+  mutate(Total_Wins = sum(
+    str_detect(all_grammys$Artist, fixed(Artist, ignore_case = TRUE)) &
+      coalesce(all_grammys$Winner, 0) == 1)) %>%
+  group_by(Descent_Category) %>%
+  summarize(Total_Wins = sum(Total_Wins, na.rm = TRUE)) %>%
+  mutate(Proportion = Total_Wins / sum(Total_Wins))
+
+#colorblind safe colors
+colorblind_palette <- c("White" = "#88CCEE", "Non-White" = "#CC6677")
+
+#nominations piechart
+plot_nominations <- ggplot(proportions_nominations, aes(x = "", y = Proportion, fill = Descent_Category)) +
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  geom_text(aes(label = percent(Proportion)), position = position_stack(vjust = 0.5), size = 5) +
+  labs(title = "Proportion of Nominations",
+       fill = "Descent Category") +
+  theme_minimal() +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid = element_blank()) +
+  scale_fill_manual(values = colorblind_palette)
+
+#wins piechart
+plot_wins <- ggplot(proportions_wins, aes(x = "", y = Proportion, fill = Descent_Category)) +
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  geom_text(aes(label = percent(Proportion)), position = position_stack(vjust = 0.5), size = 5) +
+  labs(title = "Proportion of Wins",
+       fill = "Descent Category") +
+  theme_minimal() +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid = element_blank()) +
+  scale_fill_manual(values = colorblind_palette)
+
+#put piecharts side by side
+grid.arrange(plot_nominations, plot_wins, ncol = 2)
+
+```
+
+*Gender-Based Analysis (Solo and Bands)*: We look at gender representation in bands. Additionally, we will look at the evolution of the proportion of gender nominations for solo artists over time.
+
+```{r gender representation in bands}
+
+band_artists <- artists_df %>% filter(Band == 1)
+
+#calculate gender proportion
+gender_proportions <- band_artists %>%
+  group_by(Gender) %>%
+  summarize(Count = n(), .groups = "drop") %>%
+  mutate(Proportion = Count / sum(Count))
+
+#piechart
+gender_pie_chart <- ggplot(gender_proportions, aes(x = "", y = Proportion, fill = Gender)) +
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  labs(title = "Proportion of Male, Mixed, and Female Bands",
+       fill = "Gender") +
+  theme_minimal() +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid = element_blank()) +
+  scale_fill_manual(values = c("Male" = "blue", "Mixed" = "purple", "Female" = "red")) +
+  geom_text(aes(label = scales::percent(Proportion)), 
+            position = position_stack(vjust = 0.5), color = "white")
+
+print(gender_pie_chart)
+
+```
+
+```{r gender solo over time}
+
+solo_artists <- artists_df %>% filter(Band == 0)
+
+#get the data
+gender_proportions <- all_grammys %>%
+  group_by(Year) %>% #to get over time, group by year
+  summarize(Male_Nominations = sum(sapply(Artist, function(artist_name) {
+        any(str_detect(solo_artists$Artist[solo_artists$Gender == "Male"],
+                       fixed(artist_name, ignore_case = TRUE)))})),
+    Female_Nominations = sum(sapply(Artist, function(artist_name) {
+        any(str_detect(solo_artists$Artist[solo_artists$Gender == "Female"],
+                       fixed(artist_name, ignore_case = TRUE)))})),
+    Total_Nominations = n()) %>% #out of total nominations that year
+  mutate(Male_Proportion = Male_Nominations / Total_Nominations,
+         Female_Proportion = Female_Nominations / Total_Nominations)
+
+#plot over time
+gender_time_plot <- ggplot(gender_proportions, aes(x = Year)) +
+  geom_line(aes(y = Male_Proportion, color = "Male"), size = 1) +
+  geom_line(aes(y = Female_Proportion, color = "Female"), size = 1) +
+  labs(title = "Proportion of Male and Female Nominations Over Time",
+    x = "Year",
+    y = "Proportion",
+    color = "Gender"
+  ) +
+  theme_minimal() +
+  scale_color_manual(values = c("Male" = "blue", "Female" = "red")) +
+  scale_x_continuous(breaks = seq(min(gender_proportions$Year, na.rm = TRUE),
+                                  max(gender_proportions$Year, na.rm = TRUE),
+                                  by = 5)) #breaks every 5 years
+
+print(gender_time_plot)
+
+```
+
+## 6. Storage:
+
+We save all the data in folders on the repo.
+
+```{r data save}
+#create directory
+data_dir <- "data"
+
+#if folder doesnt already exist, create it
+if (!dir.exists(data_dir)) {
+  dir.create(data_dir)
+  message("'data' folder created.")}
+
+#save all_grammys as csv in data
+write.csv(all_grammys, file = file.path(data_dir, "all_grammys.csv"), row.names = FALSE)
+
+#create subdirectory for artists_df relational database
+artists_dir <- file.path(data_dir, "artists")
+
+#if folder doesnt already exist, create it
+if (!dir.exists(artists_dir)) {
+  dir.create(artists_dir)
+  message("'artists' folder created.")}
+
+#save artists and related dfs in folder
+write.csv(artists_df, file = file.path(artists_dir, "artists_df.csv"), row.names = FALSE)
+write.csv(genres_df, file = file.path(artists_dir, "genres_df.csv"), row.names = FALSE)
+write.csv(labels_df, file = file.path(artists_dir, "labels_df.csv"), row.names = FALSE)
+write.csv(descent_df, file = file.path(artists_dir, "descent_df.csv"), row.names = FALSE)
+write.csv(years_active_save, file = file.path(artists_dir, "years_active_df.csv"), row.names = FALSE)
+```
+
+We also save all the output tables into folders in the repo.
+
+```{r output save}
+
+tables_dir <- "tables"
+figures_dir <- "figures"
+
+#if folders dont already exist, create them
+if (!dir.exists(tables_dir)) dir.create(tables_dir)
+if (!dir.exists(figures_dir)) dir.create(figures_dir)
+
+#save the tables
+write.csv(winners, file = file.path(tables_dir, "table1_winners.csv"), row.names = FALSE)
+write.csv(bands, file = file.path(tables_dir, "table2_bands.csv"), row.names = FALSE)
+write.csv(biography, file = file.path(tables_dir, "table3_biography.csv"), row.names = FALSE)
+write.csv(gender_descent, file = file.path(tables_dir, "table4_gender_descent.csv"), row.names = FALSE)
+write.csv(preview_genres, file = file.path(tables_dir, "table5_preview_genres.csv"), row.names = FALSE)
+write.csv(preview_labels, file = file.path(tables_dir, "table6_preview_labels.csv"), row.names = FALSE)
+write.csv(preview_descent, file = file.path(tables_dir, "table7_preview_descent.csv"), row.names = FALSE)
+write.csv(win_rates, file = file.path(tables_dir, "table9_win_rates.csv"), row.names = FALSE)
+
+#save the figures
+ggsave(file.path(figures_dir, "figure1_gender_over_time.png"), gender_time_plot, width = 8, height = 6)
+ggsave(file.path(figures_dir, "figure1_gender_pie_chart.png"), gender_pie_chart, width = 8, height = 6)
+ggsave(file.path(figures_dir, "figure2_plot_nominations.png"), plot_nominations, width = 8, height = 6)
+ggsave(file.path(figures_dir, "figure2_plot_wins.png"), plot_wins, width = 8, height = 6)
+```
+
+# Code appendix
+```{r ref.label = knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
